@@ -22,12 +22,24 @@ MIL_TYPES = ['F16', 'F15', 'F18', 'F22', 'F35', 'C130', 'C160', 'C17', 'A400', '
              'AH64', 'CH47', 'UH1', 'H47', 'H60', 'H64', 'TOR', 'EUFI', 'RFAL', 'MIRA', 'TIGR', 'NH90', 'U2']
 
 
+def matches_mil_type(t, p):
+    # A plain prefix match lets a short military code like "C17" (C-17 Globemaster)
+    # wrongly match unrelated civilian types that extend it with more digits, e.g.
+    # "C172" (Cessna 172). Military variant suffixes are letters (e.g. "UH1H"),
+    # never digits, so only count it as a match when the next character isn't one.
+    if not t.startswith(p):
+        return False
+    if len(t) == len(p):
+        return True
+    return not t[len(p)].isdigit()
+
+
 def is_military(a):
     db_flags = a.get('dbFlags')
     if db_flags and (db_flags & 1):
         return True
     t = (a.get('t') or '').upper()
-    return any(t.startswith(p) for p in MIL_TYPES)
+    return any(matches_mil_type(t, p) for p in MIL_TYPES)
 
 
 def haversine(lat1, lon1, lat2, lon2):
