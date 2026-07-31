@@ -16,6 +16,9 @@ POLL_INTERVAL = 5
 MIN_OVERFLIGHT_ALT_FT = 100
 RANGE_BUCKET_DEG = 5
 RANGE_BUCKETS = 360 // RANGE_BUCKET_DEG
+RANGE_DIST_BIN_KM = 5
+RANGE_PERCENTILE = 0.95
+RANGE_MIN_SAMPLES = 5
 # Mirrors the frontend's MIL_TYPES list (index.html) so "military" means the same
 # thing in the stats DB as it does on the map/sidebar.
 MIL_TYPES = ['F16', 'F15', 'F18', 'F22', 'F35', 'C130', 'C160', 'C17', 'A400', 'KC135', 'KC46', 'KC2', 'E3', 'P8', 'P3',
@@ -105,6 +108,18 @@ def get_db():
         max_dist_km REAL,
         PRIMARY KEY (seen_date, bucket)
     )''')
+    # Distance histogram per bearing bucket (5km bins), replacing the plain running
+    # max above for the map contour: a single far-off outlier detection shouldn't
+    # spike the whole contour outward. Storing counts per bin keeps this bounded in
+    # size (unlike storing every raw sample) while still letting us compute a
+    # percentile at query time.
+    conn.execute('''CREATE TABLE IF NOT EXISTS range_hist (
+        seen_date TEXT NOT NULL,
+        bucket INTEGER NOT NULL,
+        dist_bin INTEGER NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (seen_date, bucket, dist_bin)
+    )''')
     return conn
 
 
@@ -139,19 +154,12 @@ def poll_once():
                 )
 
             bucket = int(brg // RANGE_BUCKET_DEG) % RANGE_BUCKETS
-            rrow = conn.execute(
-                'SELECT max_dist_km FROM range_stats WHERE seen_date=? AND bucket=?', (today, bucket)
-            ).fetchone()
-            if rrow is None:
-                conn.execute(
-                    'INSERT INTO range_stats (seen_date, bucket, max_dist_km) VALUES (?,?,?)',
-                    (today, bucket, dist)
-                )
-            elif rrow[0] is None or dist > rrow[0]:
-                conn.execute(
-                    'UPDATE range_stats SET max_dist_km=? WHERE seen_date=? AND bucket=?',
-                    (dist, today, bucket)
-                )
+            dist_bin = int(dist // RANGE_DIST_BIN_KM)
+            conn.execute(
+                'INSERT INTO range_hist (seen_date, bucket, dist_bin, count) VALUES (?,?,?,1) '
+                'ON CONFLICT(seen_date, bucket, dist_bin) DO UPDATE SET count = count + 1',
+                (today, bucket, dist_bin)
+            )
 
         alt = a.get('alt_baro')
         alt = alt if isinstance(alt, (int, float)) else None
@@ -295,10 +303,25 @@ def get_summary(range_):
         directions[q] = d
 
     range_where = 'seen_date = ?' if range_ == 'today' else '1=1'
-    range_rows = conn.execute(
-        f'SELECT bucket, MAX(max_dist_km) FROM range_stats WHERE {range_where} GROUP BY bucket', params
+    hist_rows = conn.execute(
+        f'SELECT bucket, dist_bin, SUM(count) FROM range_hist WHERE {range_where} '
+        f'GROUP BY bucket, dist_bin ORDER BY bucket, dist_bin', params
     ).fetchall()
-    range_outline = {str(b): d for b, d in range_rows}
+    hist_by_bucket = {}
+    for bucket, dist_bin, cnt in hist_rows:
+        hist_by_bucket.setdefault(bucket, []).append((dist_bin, cnt))
+    range_outline = {}
+    for bucket, bins in hist_by_bucket.items():
+        total = sum(c for _, c in bins)
+        if total < RANGE_MIN_SAMPLES:
+            continue
+        target = RANGE_PERCENTILE * total
+        cum = 0
+        for dist_bin, count in bins:
+            cum += count
+            if cum >= target:
+                range_outline[str(bucket)] = (dist_bin + 0.5) * RANGE_DIST_BIN_KM
+                break
 
     conn.close()
     return {
