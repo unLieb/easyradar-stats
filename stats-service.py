@@ -14,6 +14,8 @@ POLL_URL = 'http://ultrafeeder/data/aircraft.json'
 STATS_URL = 'http://ultrafeeder/data/stats.json'
 POLL_INTERVAL = 5
 MIN_OVERFLIGHT_ALT_FT = 100
+RANGE_BUCKET_DEG = 5
+RANGE_BUCKETS = 360 // RANGE_BUCKET_DEG
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -71,6 +73,12 @@ def get_db():
         start_total INTEGER,
         latest_total INTEGER
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS range_stats (
+        seen_date TEXT NOT NULL,
+        bucket INTEGER NOT NULL,
+        max_dist_km REAL,
+        PRIMARY KEY (seen_date, bucket)
+    )''')
     return conn
 
 
@@ -88,7 +96,8 @@ def poll_once():
         dist = haversine(SITE_LAT, SITE_LON, lat, lon) if lat is not None and lon is not None else None
 
         if dist is not None:
-            q = quadrant(bearing(SITE_LAT, SITE_LON, lat, lon))
+            brg = bearing(SITE_LAT, SITE_LON, lat, lon)
+            q = quadrant(brg)
             drow = conn.execute(
                 'SELECT max_dist_km FROM direction_stats WHERE seen_date=? AND quadrant=?', (today, q)
             ).fetchone()
@@ -101,6 +110,21 @@ def poll_once():
                 conn.execute(
                     'UPDATE direction_stats SET max_dist_km=? WHERE seen_date=? AND quadrant=?',
                     (dist, today, q)
+                )
+
+            bucket = int(brg // RANGE_BUCKET_DEG) % RANGE_BUCKETS
+            rrow = conn.execute(
+                'SELECT max_dist_km FROM range_stats WHERE seen_date=? AND bucket=?', (today, bucket)
+            ).fetchone()
+            if rrow is None:
+                conn.execute(
+                    'INSERT INTO range_stats (seen_date, bucket, max_dist_km) VALUES (?,?,?)',
+                    (today, bucket, dist)
+                )
+            elif rrow[0] is None or dist > rrow[0]:
+                conn.execute(
+                    'UPDATE range_stats SET max_dist_km=? WHERE seen_date=? AND bucket=?',
+                    (dist, today, bucket)
                 )
 
         alt = a.get('alt_baro')
@@ -232,6 +256,12 @@ def get_summary(range_):
     for q, d in dir_rows:
         directions[q] = d
 
+    range_where = 'seen_date = ?' if range_ == 'today' else '1=1'
+    range_rows = conn.execute(
+        f'SELECT bucket, MAX(max_dist_km) FROM range_stats WHERE {range_where} GROUP BY bucket', params
+    ).fetchall()
+    range_outline = {str(b): d for b, d in range_rows}
+
     conn.close()
     return {
         'uniqueCount': unique_count,
@@ -245,6 +275,8 @@ def get_summary(range_):
         'avgAlt': avg_row[1] if avg_row else None,
         'messagesToday': messages_today,
         'directions': directions,
+        'rangeOutline': range_outline,
+        'rangeBucketDeg': RANGE_BUCKET_DEG,
     }
 
 
