@@ -23,6 +23,8 @@ RANGE_MIN_SAMPLES = 5
 # thing in the stats DB as it does on the map/sidebar.
 MIL_TYPES = ['F16', 'F15', 'F18', 'F22', 'F35', 'C130', 'C160', 'C17', 'A400', 'KC135', 'KC46', 'KC2', 'E3', 'P8', 'P3',
              'AH64', 'CH47', 'UH1', 'H47', 'H60', 'H64', 'TOR', 'EUFI', 'RFAL', 'MIRA', 'TIGR', 'NH90', 'U2']
+DAILY_1000_THRESHOLD = 1000
+RANGE_400KM_THRESHOLD_KM = 400
 
 
 def matches_mil_type(t, p):
@@ -120,7 +122,44 @@ def get_db():
         count INTEGER NOT NULL,
         PRIMARY KEY (seen_date, bucket, dist_bin)
     )''')
+    # One-time badge unlocks (each id can only ever be inserted once).
+    conn.execute('''CREATE TABLE IF NOT EXISTS achievements (
+        id TEXT PRIMARY KEY,
+        unlocked_at INTEGER,
+        hex TEXT,
+        callsign TEXT
+    )''')
+    # Current standing personal-best per category; overwritten (not appended) each
+    # time it's beaten, so the frontend can show "current record + when it was set".
+    conn.execute('''CREATE TABLE IF NOT EXISTS records (
+        category TEXT PRIMARY KEY,
+        value REAL,
+        hex TEXT,
+        callsign TEXT,
+        broken_at INTEGER
+    )''')
     return conn
+
+
+def unlock_achievement(conn, achievement_id, hex_, callsign, now_ts):
+    conn.execute(
+        'INSERT OR IGNORE INTO achievements (id, unlocked_at, hex, callsign) VALUES (?,?,?,?)',
+        (achievement_id, now_ts, hex_, callsign)
+    )
+
+
+def maybe_break_record(conn, category, value, hex_, callsign, now_ts, higher_is_better):
+    if value is None:
+        return
+    row = conn.execute('SELECT value FROM records WHERE category=?', (category,)).fetchone()
+    is_new_record = row is None or (value > row[0] if higher_is_better else value < row[0])
+    if is_new_record:
+        conn.execute(
+            'INSERT INTO records (category, value, hex, callsign, broken_at) VALUES (?,?,?,?,?) '
+            'ON CONFLICT(category) DO UPDATE SET value=excluded.value, hex=excluded.hex, '
+            'callsign=excluded.callsign, broken_at=excluded.broken_at',
+            (category, value, hex_, callsign, now_ts)
+        )
 
 
 def poll_once():
@@ -169,6 +208,24 @@ def poll_once():
         type_ = a.get('t') or (a.get('desc') or '').strip() or None
         callsign = (a.get('flight') or '').strip() or None
         mil = 1 if is_military(a) else 0
+        cat = a.get('category') or ''
+        t_upper = (a.get('t') or '').upper()
+
+        if t_upper.startswith('A38'):
+            unlock_achievement(conn, 'first_a380', hex_, callsign, now_ts)
+        if t_upper == 'CONC':
+            unlock_achievement(conn, 'first_concorde', hex_, callsign, now_ts)
+        if cat == 'A7':
+            unlock_achievement(conn, 'first_helicopter', hex_, callsign, now_ts)
+        if mil:
+            unlock_achievement(conn, 'first_military', hex_, callsign, now_ts)
+        if dist is not None and dist >= RANGE_400KM_THRESHOLD_KM:
+            unlock_achievement(conn, 'range_400km', hex_, callsign, now_ts)
+
+        maybe_break_record(conn, 'max_alt', alt, hex_, callsign, now_ts, higher_is_better=True)
+        maybe_break_record(conn, 'max_dist', dist, hex_, callsign, now_ts, higher_is_better=True)
+        maybe_break_record(conn, 'max_speed', speed, hex_, callsign, now_ts, higher_is_better=True)
+        maybe_break_record(conn, 'min_alt', overflight_alt, hex_, callsign, now_ts, higher_is_better=False)
 
         row = conn.execute(
             'SELECT max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military FROM sightings WHERE hex=? AND seen_date=?',
@@ -192,6 +249,13 @@ def poll_once():
                 'type=COALESCE(?, type), callsign=COALESCE(?, callsign) WHERE hex=? AND seen_date=?',
                 (new_alt, new_dist, new_speed, new_min_alt, new_mil, type_, callsign, hex_, today)
             )
+
+    today_count = conn.execute(
+        'SELECT COUNT(DISTINCT hex) FROM sightings WHERE seen_date=?', (today,)
+    ).fetchone()[0]
+    if today_count >= DAILY_1000_THRESHOLD:
+        unlock_achievement(conn, 'daily_1000', None, None, now_ts)
+
     conn.commit()
     conn.close()
 
@@ -343,6 +407,22 @@ def get_summary(range_):
     }
 
 
+def get_achievements():
+    conn = get_db()
+    unlocked = conn.execute('SELECT id, unlocked_at, hex, callsign FROM achievements').fetchall()
+    records = conn.execute('SELECT category, value, hex, callsign, broken_at FROM records').fetchall()
+    conn.close()
+    return {
+        'unlocked': [
+            {'id': i, 'unlockedAt': ts, 'hex': hex_, 'callsign': cs} for i, ts, hex_, cs in unlocked
+        ],
+        'records': {
+            cat: {'value': val, 'hex': hex_, 'callsign': cs, 'brokenAt': ts}
+            for cat, val, hex_, cs, ts in records
+        },
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -365,6 +445,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception as e:
                 print('summary error:', e, flush=True)
+                self.send_response(500)
+                self.end_headers()
+        elif parsed.path == '/api/achievements':
+            try:
+                body = json.dumps(get_achievements()).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                print('achievements error:', e, flush=True)
                 self.send_response(500)
                 self.end_headers()
         else:
