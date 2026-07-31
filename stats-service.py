@@ -4,7 +4,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -19,19 +19,294 @@ RANGE_BUCKETS = 360 // RANGE_BUCKET_DEG
 RANGE_DIST_BIN_KM = 5
 RANGE_PERCENTILE = 0.95
 RANGE_MIN_SAMPLES = 5
+
+# --- Achievement thresholds/catalogs -----------------------------------------
 # Mirrors the frontend's MIL_TYPES list (index.html) so "military" means the same
 # thing in the stats DB as it does on the map/sidebar.
 MIL_TYPES = ['F16', 'F15', 'F18', 'F22', 'F35', 'C130', 'C160', 'C17', 'A400', 'KC135', 'KC46', 'KC2', 'E3', 'P8', 'P3',
              'AH64', 'CH47', 'UH1', 'H47', 'H60', 'H64', 'TOR', 'EUFI', 'RFAL', 'MIRA', 'TIGR', 'NH90', 'U2']
-DAILY_1000_THRESHOLD = 1000
-RANGE_400KM_THRESHOLD_KM = 400
+BUSINESS_TYPES = ['LJ', 'C25', 'C56', 'C68', 'C700', 'C750', 'GLF', 'GL5', 'GLEX', 'FA7', 'F2TH', 'F900',
+                   'CL30', 'CL35', 'E50', 'E55', 'EA50', 'PC24', 'H25', 'BE40', 'ASTR']
+EINSATZ_CALLSIGN_PREFIXES = ['CHRISTOPH', 'RESCUE', 'REGA', 'POLIZEI', 'POLICE', 'BPOL']
+
+# (achievement id, list of type-code prefixes that unlock it) - checked with the
+# same digit-boundary-safe prefix match used for MIL_TYPES.
+TYPE_ACHIEVEMENTS = [
+    ('first_a380', ['A388']),  # exact code, not a prefix: "A38" would be blocked by
+                                # the digit-boundary check below (A388 ends in a digit)
+    ('first_concorde', ['CONC']),
+    ('first_business', BUSINESS_TYPES),
+    ('first_seaplane', ['PBY', 'CL41', 'CL21']),
+    ('first_firefighter', ['CL41', 'CL21', 'AT8']),
+    ('first_osprey', ['V22']),
+    ('first_chinook', ['CH47']),
+    ('rare_a340', ['A340']),
+    ('rare_antonov', ['AN12', 'AN24', 'AN26', 'AN28', 'AN30', 'AN32', 'AN72', 'A124', 'A140', 'A148', 'A158', 'A225']),
+    ('rare_beluga', ['A3ST']),
+    ('rare_dreamlifter', ['B74S']),
+    ('rare_vc25', ['VC25']),
+    ('rare_e3sentry', ['E3']),
+    ('rare_u2', ['U2']),
+    ('rare_sr71', ['SR71']),
+    ('rare_b2spirit', ['B2']),
+    ('rare_b52', ['B52']),
+    ('rare_c17', ['C17']),
+    ('rare_f35', ['F35']),
+    ('rare_eurofighter', ['EUFI']),
+    ('rare_fa18', ['F18']),
+    ('rare_p8', ['P8']),
+    ('rare_kc46', ['KC46']),
+    ('rare_kc135', ['KC135']),
+    ('rare_e6mercury', ['E6']),
+]
+# (achievement id, callsign prefixes)
+CALLSIGN_ACHIEVEMENTS = [
+    ('first_rescue_heli', ['CHRISTOPH', 'RESCUE', 'REGA']),
+    ('rare_nasa', ['NASA']),
+]
+# (achievement id, ICAO airline designator)
+AIRLINE_FIRST_ACHIEVEMENTS = [
+    ('first_lufthansa', 'DLH'),
+    ('first_ryanair', 'RYR'),
+    ('first_emirates', 'UAE'),
+    ('first_singapore', 'SIA'),
+    ('first_qantas', 'QFA'),
+]
+AIRLINE_CODE_TO_ACHIEVEMENT = {code: ach_id for ach_id, code in AIRLINE_FIRST_ACHIEVEMENTS}
+AIRLINE_COUNT_THRESHOLDS = [100, 250, 500]
+RANGE_THRESHOLDS_KM = [100, 150, 200, 250, 300, 400]
+DAILY_COUNT_THRESHOLDS = [100, 500, 1000, 2500, 5000]
+MSG_THRESHOLDS = [100000, 1000000, 10000000, 100000000]
+ALT_THRESHOLDS_FT = [30000, 40000, 45000]
+LOWALT_THRESHOLDS_M = [1000, 500, 250, 100]
+COUNTRY_FIRST_ACHIEVEMENTS = {
+    'de': 'country_de', 'us': 'country_us', 'gb': 'country_gb', 'fr': 'country_fr',
+    'it': 'country_it', 'es': 'country_es', 'nl': 'country_nl', 'pl': 'country_pl',
+    'ch': 'country_ch', 'at': 'country_at', 'ru': 'country_ru', 'cn': 'country_cn',
+    'jp': 'country_jp', 'ae': 'country_ae', 'tr': 'country_tr',
+}
+COUNTRY_COUNT_THRESHOLDS = [50]
+ANNIVERSARY_DAYS = [1, 7, 30, 100, 365]
+NIGHT_OWL_THRESHOLD = 100
+
+# ICAO 24-bit address allocation ranges -> ISO 3166-1 alpha-2 country code.
+# Ported from tar1090's flags.js (same source used for the frontend's flag icons).
+ICAO_COUNTRY_RANGES = [
+    (0x004000, 0x0047FF, 'zw'),
+    (0x006000, 0x006FFF, 'mz'),
+    (0x008000, 0x00FFFF, 'za'),
+    (0x010000, 0x017FFF, 'eg'),
+    (0x018000, 0x01FFFF, 'ly'),
+    (0x020000, 0x027FFF, 'ma'),
+    (0x028000, 0x02FFFF, 'tn'),
+    (0x030000, 0x0307FF, 'bw'),
+    (0x032000, 0x032FFF, 'bi'),
+    (0x034000, 0x034FFF, 'cm'),
+    (0x035000, 0x0357FF, 'km'),
+    (0x036000, 0x036FFF, 'cg'),
+    (0x038000, 0x038FFF, 'ci'),
+    (0x03E000, 0x03EFFF, 'ga'),
+    (0x040000, 0x040FFF, 'et'),
+    (0x042000, 0x042FFF, 'gq'),
+    (0x044000, 0x044FFF, 'gh'),
+    (0x046000, 0x046FFF, 'gn'),
+    (0x048000, 0x0487FF, 'gw'),
+    (0x04A000, 0x04A7FF, 'ls'),
+    (0x04C000, 0x04CFFF, 'ke'),
+    (0x050000, 0x050FFF, 'lr'),
+    (0x054000, 0x054FFF, 'mg'),
+    (0x058000, 0x058FFF, 'mw'),
+    (0x05A000, 0x05A7FF, 'mv'),
+    (0x05C000, 0x05CFFF, 'ml'),
+    (0x05E000, 0x05E7FF, 'mr'),
+    (0x060000, 0x0607FF, 'mu'),
+    (0x062000, 0x062FFF, 'ne'),
+    (0x064000, 0x064FFF, 'ng'),
+    (0x068000, 0x068FFF, 'ug'),
+    (0x06A000, 0x06AFFF, 'qa'),
+    (0x06C000, 0x06CFFF, 'cf'),
+    (0x06E000, 0x06EFFF, 'rw'),
+    (0x070000, 0x070FFF, 'sn'),
+    (0x074000, 0x0747FF, 'sc'),
+    (0x076000, 0x0767FF, 'sl'),
+    (0x078000, 0x078FFF, 'so'),
+    (0x07A000, 0x07A7FF, 'sz'),
+    (0x07C000, 0x07CFFF, 'sd'),
+    (0x080000, 0x080FFF, 'tz'),
+    (0x084000, 0x084FFF, 'td'),
+    (0x088000, 0x088FFF, 'tg'),
+    (0x08A000, 0x08AFFF, 'zm'),
+    (0x08C000, 0x08CFFF, 'cd'),
+    (0x090000, 0x090FFF, 'ao'),
+    (0x094000, 0x0947FF, 'bj'),
+    (0x096000, 0x0967FF, 'cv'),
+    (0x098000, 0x0987FF, 'dj'),
+    (0x09A000, 0x09AFFF, 'gm'),
+    (0x09C000, 0x09CFFF, 'bf'),
+    (0x09E000, 0x09E7FF, 'st'),
+    (0x0A0000, 0x0A7FFF, 'dz'),
+    (0x0A8000, 0x0A8FFF, 'bs'),
+    (0x0AA000, 0x0AA7FF, 'bb'),
+    (0x0AB000, 0x0AB7FF, 'bz'),
+    (0x0AC000, 0x0ADFFF, 'co'),
+    (0x0AE000, 0x0AEFFF, 'cr'),
+    (0x0B0000, 0x0B0FFF, 'cu'),
+    (0x0B2000, 0x0B2FFF, 'sv'),
+    (0x0B4000, 0x0B4FFF, 'gt'),
+    (0x0B6000, 0x0B6FFF, 'gy'),
+    (0x0B8000, 0x0B8FFF, 'ht'),
+    (0x0BA000, 0x0BAFFF, 'hn'),
+    (0x0BC000, 0x0BC7FF, 'vc'),
+    (0x0BE000, 0x0BEFFF, 'jm'),
+    (0x0C0000, 0x0C0FFF, 'ni'),
+    (0x0C2000, 0x0C2FFF, 'pa'),
+    (0x0C4000, 0x0C4FFF, 'do'),
+    (0x0C6000, 0x0C6FFF, 'tt'),
+    (0x0C8000, 0x0C8FFF, 'sr'),
+    (0x0CA000, 0x0CA7FF, 'ag'),
+    (0x0CC000, 0x0CC7FF, 'gd'),
+    (0x0D0000, 0x0D7FFF, 'mx'),
+    (0x0D8000, 0x0DFFFF, 've'),
+    (0x100000, 0x1FFFFF, 'ru'),
+    (0x201000, 0x2017FF, 'na'),
+    (0x202000, 0x2027FF, 'er'),
+    (0x300000, 0x33FFFF, 'it'),
+    (0x340000, 0x37FFFF, 'es'),
+    (0x380000, 0x3BFFFF, 'fr'),
+    (0x3C0000, 0x3FFFFF, 'de'),
+    (0x400000, 0x4001BF, 'bm'),
+    (0x4001C0, 0x4001FF, 'ky'),
+    (0x400300, 0x4003FF, 'tc'),
+    (0x424135, 0x4241F2, 'ky'),
+    (0x424200, 0x4246FF, 'bm'),
+    (0x424700, 0x424899, 'ky'),
+    (0x424B00, 0x424BFF, 'im'),
+    (0x43BE00, 0x43BEFF, 'bm'),
+    (0x43E700, 0x43EAFD, 'im'),
+    (0x43EAFE, 0x43EEFF, 'gg'),
+    (0x400000, 0x43FFFF, 'gb'),
+    (0x440000, 0x447FFF, 'at'),
+    (0x448000, 0x44FFFF, 'be'),
+    (0x450000, 0x457FFF, 'bg'),
+    (0x458000, 0x45FFFF, 'dk'),
+    (0x460000, 0x467FFF, 'fi'),
+    (0x468000, 0x46FFFF, 'gr'),
+    (0x470000, 0x477FFF, 'hu'),
+    (0x478000, 0x47FFFF, 'no'),
+    (0x480000, 0x487FFF, 'nl'),
+    (0x488000, 0x48FFFF, 'pl'),
+    (0x490000, 0x497FFF, 'pt'),
+    (0x498000, 0x49FFFF, 'cz'),
+    (0x4A0000, 0x4A7FFF, 'ro'),
+    (0x4A8000, 0x4AFFFF, 'se'),
+    (0x4B0000, 0x4B7FFF, 'ch'),
+    (0x4B8000, 0x4BFFFF, 'tr'),
+    (0x4C0000, 0x4C7FFF, 'rs'),
+    (0x4C8000, 0x4C87FF, 'cy'),
+    (0x4CA000, 0x4CAFFF, 'ie'),
+    (0x4CC000, 0x4CCFFF, 'is'),
+    (0x4D0000, 0x4D07FF, 'lu'),
+    (0x4D2000, 0x4D27FF, 'mt'),
+    (0x4D4000, 0x4D47FF, 'mc'),
+    (0x500000, 0x5007FF, 'sm'),
+    (0x501000, 0x5017FF, 'al'),
+    (0x501800, 0x501FFF, 'hr'),
+    (0x502800, 0x502FFF, 'lv'),
+    (0x503800, 0x503FFF, 'lt'),
+    (0x504800, 0x504FFF, 'md'),
+    (0x505800, 0x505FFF, 'sk'),
+    (0x506800, 0x506FFF, 'si'),
+    (0x507800, 0x507FFF, 'uz'),
+    (0x508000, 0x50FFFF, 'ua'),
+    (0x510000, 0x5107FF, 'by'),
+    (0x511000, 0x5117FF, 'ee'),
+    (0x512000, 0x5127FF, 'mk'),
+    (0x513000, 0x5137FF, 'ba'),
+    (0x514000, 0x5147FF, 'ge'),
+    (0x515000, 0x5157FF, 'tj'),
+    (0x516000, 0x5167FF, 'me'),
+    (0x600000, 0x6007FF, 'am'),
+    (0x600800, 0x600FFF, 'az'),
+    (0x601000, 0x6017FF, 'kg'),
+    (0x601800, 0x601FFF, 'tm'),
+    (0x680000, 0x6807FF, 'bt'),
+    (0x681000, 0x6817FF, 'fm'),
+    (0x682000, 0x6827FF, 'mn'),
+    (0x683000, 0x6837FF, 'kz'),
+    (0x684000, 0x6847FF, 'pw'),
+    (0x700000, 0x700FFF, 'af'),
+    (0x702000, 0x702FFF, 'bd'),
+    (0x704000, 0x704FFF, 'mm'),
+    (0x706000, 0x706FFF, 'kw'),
+    (0x708000, 0x708FFF, 'la'),
+    (0x70A000, 0x70AFFF, 'np'),
+    (0x70C000, 0x70C7FF, 'om'),
+    (0x70E000, 0x70EFFF, 'kh'),
+    (0x710000, 0x717FFF, 'sa'),
+    (0x718000, 0x71FFFF, 'kr'),
+    (0x720000, 0x727FFF, 'kp'),
+    (0x728000, 0x72FFFF, 'iq'),
+    (0x730000, 0x737FFF, 'ir'),
+    (0x738000, 0x73FFFF, 'il'),
+    (0x740000, 0x747FFF, 'jo'),
+    (0x748000, 0x74FFFF, 'lb'),
+    (0x750000, 0x757FFF, 'my'),
+    (0x758000, 0x75FFFF, 'ph'),
+    (0x760000, 0x767FFF, 'pk'),
+    (0x768000, 0x76FFFF, 'sg'),
+    (0x770000, 0x777FFF, 'lk'),
+    (0x778000, 0x77FFFF, 'sy'),
+    (0x789000, 0x789FFF, 'hk'),
+    (0x780000, 0x7BFFFF, 'cn'),
+    (0x7C0000, 0x7FFFFF, 'au'),
+    (0x800000, 0x83FFFF, 'in'),
+    (0x840000, 0x87FFFF, 'jp'),
+    (0x880000, 0x887FFF, 'th'),
+    (0x888000, 0x88FFFF, 'vn'),
+    (0x890000, 0x890FFF, 'ye'),
+    (0x894000, 0x894FFF, 'bh'),
+    (0x895000, 0x8957FF, 'bn'),
+    (0x896000, 0x896FFF, 'ae'),
+    (0x897000, 0x8977FF, 'sb'),
+    (0x898000, 0x898FFF, 'pg'),
+    (0x899000, 0x8997FF, 'tw'),
+    (0x8A0000, 0x8A7FFF, 'id'),
+    (0x900000, 0x9007FF, 'mh'),
+    (0x901000, 0x9017FF, 'sk'),
+    (0x902000, 0x9027FF, 'ws'),
+    (0xA00000, 0xAFFFFF, 'us'),
+    (0xC00000, 0xC3FFFF, 'ca'),
+    (0xC80000, 0xC87FFF, 'nz'),
+    (0xC88000, 0xC88FFF, 'fj'),
+    (0xC8A000, 0xC8A7FF, 'nr'),
+    (0xC8C000, 0xC8C7FF, 'lc'),
+    (0xC8D000, 0xC8D7FF, 'to'),
+    (0xC8E000, 0xC8E7FF, 'ki'),
+    (0xC90000, 0xC907FF, 'vu'),
+    (0xC91000, 0xC917FF, 'ad'),
+    (0xC92000, 0xC927FF, 'dm'),
+    (0xC93000, 0xC937FF, 'kn'),
+    (0xC94000, 0xC947FF, 'ss'),
+    (0xC95000, 0xC957FF, 'tl'),
+    (0xC97000, 0xC977FF, 'tv'),
+    (0xE00000, 0xE3FFFF, 'ar'),
+    (0xE40000, 0xE7FFFF, 'br'),
+    (0xE80000, 0xE80FFF, 'cl'),
+    (0xE84000, 0xE84FFF, 'ec'),
+    (0xE88000, 0xE88FFF, 'py'),
+    (0xE8C000, 0xE8CFFF, 'pe'),
+    (0xE90000, 0xE90FFF, 'uy'),
+    (0xE94000, 0xE94FFF, 'bo'),
+    (0xF00000, 0xF07FFF, None),
+    (0xF09000, 0xF097FF, None),
+]
 
 
-def matches_mil_type(t, p):
-    # A plain prefix match lets a short military code like "C17" (C-17 Globemaster)
-    # wrongly match unrelated civilian types that extend it with more digits, e.g.
-    # "C172" (Cessna 172). Military variant suffixes are letters (e.g. "UH1H"),
-    # never digits, so only count it as a match when the next character isn't one.
+def matches_type_prefix(t, p):
+    # A plain prefix match lets a short code like "C17" (C-17 Globemaster) wrongly
+    # match unrelated types that extend it with more digits, e.g. "C172" (Cessna
+    # 172). Variant suffixes are letters (e.g. "UH1H"), never digits, so only count
+    # it as a match when the next character isn't one.
     if not t.startswith(p):
         return False
     if len(t) == len(p):
@@ -44,7 +319,31 @@ def is_military(a):
     if db_flags and (db_flags & 1):
         return True
     t = (a.get('t') or '').upper()
-    return any(matches_mil_type(t, p) for p in MIL_TYPES)
+    return any(matches_type_prefix(t, p) for p in MIL_TYPES)
+
+
+def country_code_for_hex(hex_):
+    if not hex_ or hex_.startswith('~'):
+        return None
+    try:
+        val = int(hex_, 16)
+    except ValueError:
+        return None
+    for start, end, cc in ICAO_COUNTRY_RANGES:
+        if start <= val <= end:
+            return cc
+    return None
+
+
+def airline_code_from_callsign(callsign):
+    if not callsign or len(callsign) < 4:
+        return None
+    code = callsign[:3]
+    if not code.isalpha() or code != code.upper():
+        return None
+    if not callsign[3].isdigit():
+        return None
+    return code
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -71,6 +370,57 @@ def quadrant(brg):
     if brg < 225:
         return 'S'
     return 'W'
+
+
+# Standard "Sunrise/Sunset Algorithm" (Almanac for Computers, 1990) - no external
+# dependency/API needed, accurate to a few minutes, plenty for a fun achievement.
+def sun_event_utc_hour(lat, lon, date, is_sunrise):
+    zenith = math.radians(90.833)
+    day_of_year = date.timetuple().tm_yday
+    lng_hour = lon / 15
+    t = day_of_year + (((6 if is_sunrise else 18) - lng_hour) / 24)
+
+    M = (0.9856 * t) - 3.289
+    L = M + (1.916 * math.sin(math.radians(M))) + (0.020 * math.sin(math.radians(2 * M))) + 282.634
+    L = L % 360
+
+    RA = math.degrees(math.atan(0.91764 * math.tan(math.radians(L))))
+    RA = RA % 360
+    l_quadrant = math.floor(L / 90) * 90
+    ra_quadrant = math.floor(RA / 90) * 90
+    RA = (RA + (l_quadrant - ra_quadrant)) / 15
+
+    sin_dec = 0.39782 * math.sin(math.radians(L))
+    cos_dec = math.cos(math.asin(sin_dec))
+    lat_rad = math.radians(lat)
+
+    cos_h = (math.cos(zenith) - (sin_dec * math.sin(lat_rad))) / (cos_dec * math.cos(lat_rad))
+    if cos_h > 1 or cos_h < -1:
+        return None  # sun never rises/sets that day at this latitude
+
+    h = (360 - math.degrees(math.acos(cos_h))) if is_sunrise else math.degrees(math.acos(cos_h))
+    h = h / 15
+
+    T = h + RA - (0.06571 * t) - 6.622
+    return (T - lng_hour) % 24
+
+
+def is_before_sunrise_now():
+    now_utc = datetime.now(timezone.utc)
+    sunrise = sun_event_utc_hour(SITE_LAT, SITE_LON, now_utc.date(), True)
+    if sunrise is None:
+        return False
+    return (now_utc.hour + now_utc.minute / 60) < sunrise
+
+
+def is_night_now():
+    now_utc = datetime.now(timezone.utc)
+    sunrise = sun_event_utc_hour(SITE_LAT, SITE_LON, now_utc.date(), True)
+    sunset = sun_event_utc_hour(SITE_LAT, SITE_LON, now_utc.date(), False)
+    if sunrise is None or sunset is None:
+        return False
+    hour = now_utc.hour + now_utc.minute / 60
+    return hour < sunrise or hour > sunset
 
 
 def get_db():
@@ -138,6 +488,31 @@ def get_db():
         callsign TEXT,
         broken_at INTEGER
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS countries_seen (
+        country_code TEXT PRIMARY KEY,
+        hex TEXT,
+        callsign TEXT,
+        first_seen_at INTEGER
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS airlines_seen (
+        code TEXT PRIMARY KEY,
+        hex TEXT,
+        callsign TEXT,
+        first_seen_at INTEGER
+    )''')
+    # readsb's own message total resets on every ultrafeeder restart; this survives
+    # that by accumulating deltas instead of trusting the raw counter directly.
+    conn.execute('''CREATE TABLE IF NOT EXISTS cumulative_messages (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_total INTEGER,
+        accumulated INTEGER
+    )''')
+    # Small generic key/value store (first-ever-start timestamp for anniversaries,
+    # running night-detection counter for the "Nachteule" achievement).
+    conn.execute('''CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
     return conn
 
 
@@ -162,12 +537,105 @@ def maybe_break_record(conn, category, value, hex_, callsign, now_ts, higher_is_
         )
 
 
+def get_meta_int(conn, key, default=0):
+    row = conn.execute('SELECT value FROM meta WHERE key=?', (key,)).fetchone()
+    return int(row[0]) if row else default
+
+
+def set_meta(conn, key, value):
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value))
+    )
+
+
+def check_achievements(conn, hex_, callsign, t_upper, cat, mil, dist, alt, overflight_alt, is_new_today, now_ts):
+    for ach_id, prefixes in TYPE_ACHIEVEMENTS:
+        if any(matches_type_prefix(t_upper, p) for p in prefixes):
+            unlock_achievement(conn, ach_id, hex_, callsign, now_ts)
+    if cat == 'A7':
+        unlock_achievement(conn, 'first_helicopter', hex_, callsign, now_ts)
+    if mil:
+        unlock_achievement(conn, 'first_military', hex_, callsign, now_ts)
+
+    cs_upper = (callsign or '').upper()
+    for ach_id, prefixes in CALLSIGN_ACHIEVEMENTS:
+        if any(cs_upper.startswith(p) for p in prefixes):
+            unlock_achievement(conn, ach_id, hex_, callsign, now_ts)
+
+    cc = country_code_for_hex(hex_)
+    if cc:
+        row = conn.execute('SELECT 1 FROM countries_seen WHERE country_code=?', (cc,)).fetchone()
+        if row is None:
+            conn.execute(
+                'INSERT INTO countries_seen (country_code, hex, callsign, first_seen_at) VALUES (?,?,?,?)',
+                (cc, hex_, callsign, now_ts)
+            )
+            ach_id = COUNTRY_FIRST_ACHIEVEMENTS.get(cc)
+            if ach_id:
+                unlock_achievement(conn, ach_id, hex_, callsign, now_ts)
+            country_count = conn.execute('SELECT COUNT(*) FROM countries_seen').fetchone()[0]
+            for threshold in COUNTRY_COUNT_THRESHOLDS:
+                if country_count >= threshold:
+                    unlock_achievement(conn, f'countries_{threshold}', None, None, now_ts)
+
+    code = airline_code_from_callsign(callsign)
+    if code:
+        row = conn.execute('SELECT 1 FROM airlines_seen WHERE code=?', (code,)).fetchone()
+        if row is None:
+            conn.execute(
+                'INSERT INTO airlines_seen (code, hex, callsign, first_seen_at) VALUES (?,?,?,?)',
+                (code, hex_, callsign, now_ts)
+            )
+            ach_id = AIRLINE_CODE_TO_ACHIEVEMENT.get(code)
+            if ach_id:
+                unlock_achievement(conn, ach_id, hex_, callsign, now_ts)
+            airline_count = conn.execute('SELECT COUNT(*) FROM airlines_seen').fetchone()[0]
+            for threshold in AIRLINE_COUNT_THRESHOLDS:
+                if airline_count >= threshold:
+                    unlock_achievement(conn, f'airlines_{threshold}', None, None, now_ts)
+
+    if dist is not None:
+        for km in RANGE_THRESHOLDS_KM:
+            if dist >= km:
+                unlock_achievement(conn, f'range_{km}km', hex_, callsign, now_ts)
+    if alt is not None:
+        for ft in ALT_THRESHOLDS_FT:
+            if alt >= ft:
+                unlock_achievement(conn, f'altitude_fl{ft // 100}', hex_, callsign, now_ts)
+    if overflight_alt is not None:
+        for m in LOWALT_THRESHOLDS_M:
+            if overflight_alt <= (m / 0.3048):
+                unlock_achievement(conn, f'lowalt_{m}m', hex_, callsign, now_ts)
+
+    now_local = datetime.now()
+    if 2 <= now_local.hour < 4:
+        unlock_achievement(conn, 'night_watchman', hex_, callsign, now_ts)
+    if is_before_sunrise_now():
+        unlock_achievement(conn, 'early_bird', hex_, callsign, now_ts)
+    if is_new_today and is_night_now():
+        night_count = get_meta_int(conn, 'night_count') + 1
+        set_meta(conn, 'night_count', night_count)
+        if night_count >= NIGHT_OWL_THRESHOLD:
+            unlock_achievement(conn, 'night_owl', None, None, now_ts)
+
+
 def poll_once():
     with urllib.request.urlopen(POLL_URL, timeout=4) as r:
         data = json.load(r)
     today = datetime.now().strftime('%Y-%m-%d')
     now_ts = int(time.time())
     conn = get_db()
+
+    start_ts = get_meta_int(conn, 'first_started_at', 0)
+    if start_ts == 0:
+        start_ts = now_ts
+        set_meta(conn, 'first_started_at', start_ts)
+    days_elapsed = (now_ts - start_ts) // 86400
+    for d in ANNIVERSARY_DAYS:
+        if days_elapsed >= d:
+            unlock_achievement(conn, f'anniversary_{d}', None, None, now_ts)
+
     for a in data.get('aircraft', []):
         hex_ = a.get('hex')
         if not hex_:
@@ -211,28 +679,19 @@ def poll_once():
         cat = a.get('category') or ''
         t_upper = (a.get('t') or '').upper()
 
-        if t_upper.startswith('A38'):
-            unlock_achievement(conn, 'first_a380', hex_, callsign, now_ts)
-        if t_upper == 'CONC':
-            unlock_achievement(conn, 'first_concorde', hex_, callsign, now_ts)
-        if cat == 'A7':
-            unlock_achievement(conn, 'first_helicopter', hex_, callsign, now_ts)
-        if mil:
-            unlock_achievement(conn, 'first_military', hex_, callsign, now_ts)
-        if dist is not None and dist >= RANGE_400KM_THRESHOLD_KM:
-            unlock_achievement(conn, 'range_400km', hex_, callsign, now_ts)
+        row = conn.execute(
+            'SELECT max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military FROM sightings WHERE hex=? AND seen_date=?',
+            (hex_, today)
+        ).fetchone()
+        is_new_today = row is None
 
+        check_achievements(conn, hex_, callsign, t_upper, cat, mil, dist, alt, overflight_alt, is_new_today, now_ts)
         maybe_break_record(conn, 'max_alt', alt, hex_, callsign, now_ts, higher_is_better=True)
         maybe_break_record(conn, 'max_dist', dist, hex_, callsign, now_ts, higher_is_better=True)
         maybe_break_record(conn, 'max_speed', speed, hex_, callsign, now_ts, higher_is_better=True)
         maybe_break_record(conn, 'min_alt', overflight_alt, hex_, callsign, now_ts, higher_is_better=False)
 
-        row = conn.execute(
-            'SELECT max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military FROM sightings WHERE hex=? AND seen_date=?',
-            (hex_, today)
-        ).fetchone()
-
-        if row is None:
+        if is_new_today:
             conn.execute(
                 'INSERT INTO sightings (hex, seen_date, type, callsign, max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military, first_seen_ts) '
                 'VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -253,8 +712,9 @@ def poll_once():
     today_count = conn.execute(
         'SELECT COUNT(DISTINCT hex) FROM sightings WHERE seen_date=?', (today,)
     ).fetchone()[0]
-    if today_count >= DAILY_1000_THRESHOLD:
-        unlock_achievement(conn, 'daily_1000', None, None, now_ts)
+    for n in DAILY_COUNT_THRESHOLDS:
+        if today_count >= n:
+            unlock_achievement(conn, f'daily_{n}', None, None, now_ts)
 
     conn.commit()
     conn.close()
@@ -267,6 +727,7 @@ def poll_stats_once():
     if total_msgs is None:
         return
     today = datetime.now().strftime('%Y-%m-%d')
+    now_ts = int(time.time())
     conn = get_db()
     row = conn.execute('SELECT start_total FROM daily_messages WHERE seen_date=?', (today,)).fetchone()
     if row is None:
@@ -282,6 +743,19 @@ def poll_stats_once():
         )
     else:
         conn.execute('UPDATE daily_messages SET latest_total=? WHERE seen_date=?', (total_msgs, today))
+
+    cum_row = conn.execute('SELECT last_total, accumulated FROM cumulative_messages WHERE id=1').fetchone()
+    if cum_row is None:
+        conn.execute('INSERT INTO cumulative_messages (id, last_total, accumulated) VALUES (1, ?, 0)', (total_msgs,))
+        accumulated = 0
+    else:
+        last_total, accumulated = cum_row
+        accumulated += (total_msgs - last_total) if total_msgs >= last_total else total_msgs
+        conn.execute('UPDATE cumulative_messages SET last_total=?, accumulated=? WHERE id=1', (total_msgs, accumulated))
+    for threshold in MSG_THRESHOLDS:
+        if accumulated >= threshold:
+            unlock_achievement(conn, f'msg_{threshold}', None, None, now_ts)
+
     conn.commit()
     conn.close()
 
@@ -411,6 +885,8 @@ def get_achievements():
     conn = get_db()
     unlocked = conn.execute('SELECT id, unlocked_at, hex, callsign FROM achievements').fetchall()
     records = conn.execute('SELECT category, value, hex, callsign, broken_at FROM records').fetchall()
+    country_count = conn.execute('SELECT COUNT(*) FROM countries_seen').fetchone()[0]
+    airline_count = conn.execute('SELECT COUNT(*) FROM airlines_seen').fetchone()[0]
     conn.close()
     return {
         'unlocked': [
@@ -420,12 +896,23 @@ def get_achievements():
             cat: {'value': val, 'hex': hex_, 'callsign': cs, 'brokenAt': ts}
             for cat, val, hex_, cs, ts in records
         },
+        'countryCount': country_count,
+        'airlineCount': airline_count,
     }
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def _send_json(self, obj):
+        body = json.dumps(obj).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -435,27 +922,14 @@ class Handler(BaseHTTPRequestHandler):
             if range_ not in ('today', 'alltime'):
                 range_ = 'today'
             try:
-                summary = get_summary(range_)
-                body = json.dumps(summary).encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(get_summary(range_))
             except Exception as e:
                 print('summary error:', e, flush=True)
                 self.send_response(500)
                 self.end_headers()
         elif parsed.path == '/api/achievements':
             try:
-                body = json.dumps(get_achievements()).encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(get_achievements())
             except Exception as e:
                 print('achievements error:', e, flush=True)
                 self.send_response(500)
