@@ -219,6 +219,13 @@ def get_summary(range_):
         f'SELECT callsign, COUNT(*) c FROM sightings WHERE {where} AND callsign IS NOT NULL '
         f'GROUP BY callsign ORDER BY c DESC LIMIT 5', params
     ).fetchall()
+    # Airline ICAO designator = first 3 letters of the callsign (e.g. DLH441 -> DLH).
+    # The GLOB filter excludes bare registrations used as callsign by GA traffic,
+    # which don't follow the "3 letters + digits" airline flight-number pattern.
+    top_airlines = conn.execute(
+        f"SELECT SUBSTR(callsign,1,3) code, COUNT(*) c FROM sightings WHERE {where} "
+        f"AND callsign GLOB '[A-Z][A-Z][A-Z][0-9]*' GROUP BY code ORDER BY c DESC LIMIT 5", params
+    ).fetchall()
     max_alt_row = conn.execute(
         f'SELECT hex, callsign, max_alt_ft FROM sightings WHERE {where} AND max_alt_ft IS NOT NULL '
         f'ORDER BY max_alt_ft DESC LIMIT 1', params
@@ -267,6 +274,7 @@ def get_summary(range_):
         'uniqueCount': unique_count,
         'topTypes': [[t, c] for t, c in top_types],
         'topCallsigns': [[cs, c] for cs, c in top_calls],
+        'topAirlineCodes': [[code, c] for code, c in top_airlines],
         'maxAlt': {'value': max_alt_row[2], 'callsign': max_alt_row[1] or max_alt_row[0]} if max_alt_row else None,
         'maxDist': {'value': max_dist_row[2], 'callsign': max_dist_row[1] or max_dist_row[0]} if max_dist_row else None,
         'maxSpeed': {'value': max_speed_row[2], 'callsign': max_speed_row[1] or max_speed_row[0]} if max_speed_row else None,
