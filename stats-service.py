@@ -887,6 +887,7 @@ def get_achievements():
     records = conn.execute('SELECT category, value, hex, callsign, broken_at FROM records').fetchall()
     country_count = conn.execute('SELECT COUNT(*) FROM countries_seen').fetchone()[0]
     airline_count = conn.execute('SELECT COUNT(*) FROM airlines_seen').fetchone()[0]
+    cum_row = conn.execute('SELECT accumulated FROM cumulative_messages WHERE id=1').fetchone()
     conn.close()
     return {
         'unlocked': [
@@ -898,6 +899,7 @@ def get_achievements():
         },
         'countryCount': country_count,
         'airlineCount': airline_count,
+        'messagesAccumulated': cum_row[0] if cum_row else 0,
     }
 
 
