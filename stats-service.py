@@ -90,6 +90,89 @@ COUNTRY_FIRST_ACHIEVEMENTS = {
 COUNTRY_COUNT_THRESHOLDS = [50]
 ANNIVERSARY_DAYS = [1, 7, 30, 100, 365]
 NIGHT_OWL_THRESHOLD = 100
+TYPE_COUNT_THRESHOLDS = [10, 25, 50, 100]
+AIRCRAFT_COUNT_THRESHOLDS = [100, 500, 1000, 2500, 5000, 10000]
+
+# XP value per achievement id, for the Radar-Level system. FROZEN once shipped -
+# existing values must never change (would silently shift already-earned levels
+# for existing users). New achievements only ever get appended with their own
+# value, never by editing an existing one. Rule of thumb applied when balancing:
+# no single achievement exceeds ~10% of total possible XP (this is why Concorde/
+# SR-71 are 800/1200 rather than the "feels right in isolation" 3000/5000 -
+# at 5000 alone they'd have been 1/3 of the entire game's XP).
+ACHIEVEMENT_XP = {
+    # Flugzeuge
+    'first_helicopter': 20, 'first_military': 40, 'first_business': 20,
+    'first_seaplane': 60, 'first_rescue_heli': 25, 'first_firefighter': 50,
+    # Airlines
+    'first_lufthansa': 15, 'first_ryanair': 15, 'first_emirates': 25,
+    'first_singapore': 30, 'first_qantas': 40,
+    'airlines_100': 100, 'airlines_250': 250, 'airlines_500': 500,
+    # Empfang
+    'range_100km': 20, 'range_150km': 35, 'range_200km': 55,
+    'range_250km': 80, 'range_300km': 110, 'range_400km': 150,
+    # Tagesrekorde
+    'daily_100': 20, 'daily_500': 40, 'daily_1000': 80, 'daily_2500': 150, 'daily_5000': 300,
+    # Nachrichten
+    'msg_100000': 20, 'msg_1000000': 60, 'msg_10000000': 150, 'msg_100000000': 400,
+    # Flughoehe
+    'altitude_fl300': 20, 'altitude_fl400': 35, 'altitude_fl450': 60,
+    # Niedrigueberflug
+    'lowalt_1000m': 20, 'lowalt_500m': 35, 'lowalt_250m': 55, 'lowalt_100m': 90,
+    # Laender
+    'country_de': 15, 'country_at': 20, 'country_ch': 20, 'country_nl': 20,
+    'country_gb': 25, 'country_fr': 25, 'country_it': 25, 'country_pl': 25,
+    'country_es': 30, 'country_tr': 40, 'country_ru': 50, 'country_ae': 60,
+    'country_us': 70, 'country_cn': 80, 'country_jp': 90, 'countries_50': 300,
+    # Zeit
+    'night_watchman': 60, 'early_bird': 50, 'night_owl': 100,
+    # Jubilaeen
+    'anniversary_1': 50, 'anniversary_7': 100, 'anniversary_30': 250,
+    'anniversary_100': 500, 'anniversary_365': 1000,
+    # Flugzeugtypen (neu)
+    'types_10': 30, 'types_25': 80, 'types_50': 180, 'types_100': 400,
+    # Gesamtflugzeuge (neu)
+    'aircraft_100': 20, 'aircraft_500': 40, 'aircraft_1000': 80,
+    'aircraft_2500': 150, 'aircraft_5000': 300, 'aircraft_10000': 600,
+    # Seltene Flugzeuge - Concorde/SR-71 bewusst gedeckelt, siehe Kommentar oben
+    'first_a380': 200, 'first_concorde': 800, 'rare_a340': 150,
+    'first_osprey': 250, 'first_chinook': 100, 'rare_antonov': 200,
+    'rare_beluga': 300, 'rare_dreamlifter': 300, 'rare_vc25': 800,
+    'rare_e3sentry': 150, 'rare_u2': 400, 'rare_sr71': 1200,
+    'rare_b2spirit': 600, 'rare_b52': 200, 'rare_c17': 80, 'rare_f35': 150,
+    'rare_eurofighter': 60, 'rare_fa18': 120, 'rare_p8': 150, 'rare_kc46': 150,
+    'rare_kc135': 100, 'rare_e6mercury': 300, 'rare_nasa': 250,
+}
+
+LEVEL_MAX = 50
+LEVEL_MAX_XP = 12000
+
+
+def xp_for_level(n):
+    if n <= 0:
+        return 0
+    if n >= LEVEL_MAX:
+        return LEVEL_MAX_XP
+    return round(LEVEL_MAX_XP * (n / LEVEL_MAX) ** 2)
+
+
+def compute_level(total_xp):
+    level = 0
+    for n in range(1, LEVEL_MAX + 1):
+        if total_xp >= xp_for_level(n):
+            level = n
+        else:
+            break
+    next_level_xp = xp_for_level(level + 1) if level < LEVEL_MAX else None
+    return {
+        'level': level,
+        'maxLevel': LEVEL_MAX,
+        'totalXp': total_xp,
+        'currentLevelXp': xp_for_level(level),
+        'nextLevelXp': next_level_xp,
+        'xpToNext': (next_level_xp - total_xp) if next_level_xp is not None else 0,
+        'bonusXp': max(0, total_xp - LEVEL_MAX_XP),
+    }
 
 # ICAO 24-bit address allocation ranges -> ISO 3166-1 alpha-2 country code.
 # Ported from tar1090's flags.js (same source used for the frontend's flag icons).
@@ -502,6 +585,12 @@ def get_db():
         callsign TEXT,
         first_seen_at INTEGER
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS types_seen (
+        type TEXT PRIMARY KEY,
+        hex TEXT,
+        callsign TEXT,
+        first_seen_at INTEGER
+    )''')
     # readsb's own message total resets on every ultrafeeder restart; this survives
     # that by accumulating deltas instead of trusting the raw counter directly.
     conn.execute('''CREATE TABLE IF NOT EXISTS cumulative_messages (
@@ -580,6 +669,18 @@ def check_achievements(conn, hex_, callsign, t_upper, cat, mil, dist, alt, overf
             for threshold in COUNTRY_COUNT_THRESHOLDS:
                 if country_count >= threshold:
                     unlock_achievement(conn, f'countries_{threshold}', None, None, now_ts)
+
+    if t_upper:
+        row = conn.execute('SELECT 1 FROM types_seen WHERE type=?', (t_upper,)).fetchone()
+        if row is None:
+            conn.execute(
+                'INSERT INTO types_seen (type, hex, callsign, first_seen_at) VALUES (?,?,?,?)',
+                (t_upper, hex_, callsign, now_ts)
+            )
+            type_count = conn.execute('SELECT COUNT(*) FROM types_seen').fetchone()[0]
+            for threshold in TYPE_COUNT_THRESHOLDS:
+                if type_count >= threshold:
+                    unlock_achievement(conn, f'types_{threshold}', None, None, now_ts)
 
     code = airline_code_from_callsign(callsign)
     if code:
@@ -717,6 +818,11 @@ def poll_once():
     for n in DAILY_COUNT_THRESHOLDS:
         if today_count >= n:
             unlock_achievement(conn, f'daily_{n}', None, None, now_ts)
+
+    total_aircraft_count = conn.execute('SELECT COUNT(DISTINCT hex) FROM sightings').fetchone()[0]
+    for n in AIRCRAFT_COUNT_THRESHOLDS:
+        if total_aircraft_count >= n:
+            unlock_achievement(conn, f'aircraft_{n}', None, None, now_ts)
 
     conn.commit()
     conn.close()
@@ -891,6 +997,7 @@ def get_achievements():
     airline_count = conn.execute('SELECT COUNT(*) FROM airlines_seen').fetchone()[0]
     cum_row = conn.execute('SELECT accumulated FROM cumulative_messages WHERE id=1').fetchone()
     conn.close()
+    total_xp = sum(ACHIEVEMENT_XP.get(i, 0) for i, ts, hex_, cs in unlocked)
     return {
         'unlocked': [
             {'id': i, 'unlockedAt': ts, 'hex': hex_, 'callsign': cs} for i, ts, hex_, cs in unlocked
@@ -902,6 +1009,7 @@ def get_achievements():
         'countryCount': country_count,
         'airlineCount': airline_count,
         'messagesAccumulated': cum_row[0] if cum_row else 0,
+        'levelInfo': compute_level(total_xp),
     }
 
 
