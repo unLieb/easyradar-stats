@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import sqlite3
 import threading
 import time
@@ -9,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 SITE_LAT, SITE_LON = 52.52319, 13.35822
+STATION_NAME = os.environ.get('STATION_NAME', '')
 DB_PATH = '/data/stats.db'
 POLL_URL = 'http://ultrafeeder/data/aircraft.json'
 STATS_URL = 'http://ultrafeeder/data/stats.json'
@@ -936,6 +938,8 @@ class Handler(BaseHTTPRequestHandler):
                 print('achievements error:', e, flush=True)
                 self.send_response(500)
                 self.end_headers()
+        elif parsed.path == '/api/station':
+            self._send_json({'name': STATION_NAME})
         else:
             self.send_response(404)
             self.end_headers()
