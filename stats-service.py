@@ -995,6 +995,8 @@ def get_achievements():
     records = conn.execute('SELECT category, value, hex, callsign, broken_at FROM records').fetchall()
     country_count = conn.execute('SELECT COUNT(*) FROM countries_seen').fetchone()[0]
     airline_count = conn.execute('SELECT COUNT(*) FROM airlines_seen').fetchone()[0]
+    type_count = conn.execute('SELECT COUNT(*) FROM types_seen').fetchone()[0]
+    aircraft_count = conn.execute('SELECT COUNT(DISTINCT hex) FROM sightings').fetchone()[0]
     cum_row = conn.execute('SELECT accumulated FROM cumulative_messages WHERE id=1').fetchone()
     conn.close()
     total_xp = sum(ACHIEVEMENT_XP.get(i, 0) for i, ts, hex_, cs in unlocked)
@@ -1008,6 +1010,8 @@ def get_achievements():
         },
         'countryCount': country_count,
         'airlineCount': airline_count,
+        'typeCount': type_count,
+        'aircraftCount': aircraft_count,
         'messagesAccumulated': cum_row[0] if cum_row else 0,
         'levelInfo': compute_level(total_xp),
     }
