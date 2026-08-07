@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-SITE_LAT, SITE_LON = 52.52319, 13.35822
+# Placeholder default (Berlin city center) - set SITE_LAT/SITE_LON via the
+# environment (see docker-compose.yml) so real receiver coordinates never
+# need to live in this file.
+SITE_LAT = float(os.environ.get('SITE_LAT', '52.5200'))
+SITE_LON = float(os.environ.get('SITE_LON', '13.4050'))
 STATION_NAME = os.environ.get('STATION_NAME', '')
 DB_PATH = '/data/stats.db'
 POLL_URL = 'http://ultrafeeder/data/aircraft.json'
