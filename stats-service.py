@@ -36,7 +36,12 @@ EINSATZ_CALLSIGN_PREFIXES = ['CHRISTOPH', 'RESCUE', 'REGA', 'POLIZEI', 'POLICE',
 TYPE_ACHIEVEMENTS = [
     ('first_a380', ['A388']),  # exact code, not a prefix: "A38" would be blocked by
                                 # the digit-boundary check below (A388 ends in a digit)
-    ('first_concorde', ['CONC']),
+    # first_concorde and rare_sr71 deliberately removed from this active list (2026-08):
+    # no flightworthy example of either exists anywhere in the world anymore, so they
+    # were permanently unearnable dead weight for every new user - see the eligibility
+    # rule in the ACHIEVEMENT_XP comment below. Their ids/XP entries stay defined further
+    # down (never unlocked, so untouched by the "never remove/edit" rule) so a future
+    # non-XP "aviation legends" gallery can reuse the same title/description content.
     ('first_business', BUSINESS_TYPES),
     ('first_seaplane', ['PBY', 'CL41', 'CL21']),
     ('first_firefighter', ['CL41', 'CL21', 'AT8']),
@@ -49,7 +54,6 @@ TYPE_ACHIEVEMENTS = [
     ('rare_vc25', ['VC25']),
     ('rare_e3sentry', ['E3']),
     ('rare_u2', ['U2']),
-    ('rare_sr71', ['SR71']),
     ('rare_b2spirit', ['B2']),
     ('rare_b52', ['B52']),
     ('rare_c17', ['C17']),
@@ -93,6 +97,19 @@ NIGHT_OWL_THRESHOLD = 100
 TYPE_COUNT_THRESHOLDS = [10, 25, 50, 100]
 AIRCRAFT_COUNT_THRESHOLDS = [100, 500, 1000, 2500, 5000, 10000]
 
+# The individual "rare aircraft" ids (excluding the retired first_concorde/rare_sr71,
+# see TYPE_ACHIEVEMENTS above) that count toward the collection-progress milestones
+# below. Region-fair by design: it doesn't matter *which* of these a station finds,
+# only how many - a Berlin station's Eurofighter/Beluga finds and a Nevada station's
+# B-2/F-22 finds both count equally toward the same milestone.
+RARE_AIRCRAFT_IDS = [
+    'first_a380', 'rare_a340', 'first_osprey', 'first_chinook', 'rare_antonov',
+    'rare_beluga', 'rare_dreamlifter', 'rare_vc25', 'rare_e3sentry', 'rare_u2',
+    'rare_b2spirit', 'rare_b52', 'rare_c17', 'rare_f35', 'rare_eurofighter',
+    'rare_fa18', 'rare_p8', 'rare_kc46', 'rare_kc135', 'rare_e6mercury', 'rare_nasa',
+]
+RARE_COLLECTION_THRESHOLDS = [1, 5, 10, 20]
+
 # XP value per achievement id, for the Radar-Level system. FROZEN once shipped -
 # existing values must never change (would silently shift already-earned levels
 # for existing users). New achievements only ever get appended with their own
@@ -134,7 +151,9 @@ ACHIEVEMENT_XP = {
     # Gesamtflugzeuge (neu)
     'aircraft_100': 20, 'aircraft_500': 40, 'aircraft_1000': 80,
     'aircraft_2500': 150, 'aircraft_5000': 300, 'aircraft_10000': 600,
-    # Seltene Flugzeuge - Concorde/SR-71 bewusst gedeckelt, siehe Kommentar oben
+    # Seltene Flugzeuge - first_concorde/rare_sr71 kept here at their original value
+    # (never touched, never unlocked - see TYPE_ACHIEVEMENTS) rather than deleted,
+    # purely so a future non-XP "legends" gallery can reuse the id/value pairing.
     'first_a380': 200, 'first_concorde': 800, 'rare_a340': 150,
     'first_osprey': 250, 'first_chinook': 100, 'rare_antonov': 200,
     'rare_beluga': 300, 'rare_dreamlifter': 300, 'rare_vc25': 800,
@@ -142,6 +161,10 @@ ACHIEVEMENT_XP = {
     'rare_b2spirit': 600, 'rare_b52': 200, 'rare_c17': 80, 'rare_f35': 150,
     'rare_eurofighter': 60, 'rare_fa18': 120, 'rare_p8': 150, 'rare_kc46': 150,
     'rare_kc135': 100, 'rare_e6mercury': 300, 'rare_nasa': 250,
+    # Seltenheiten-Sammlung (neu, 2026-08): belohnt die Anzahl gefundener seltener
+    # Flugzeuge statt einzelner Typen - fair unabhaengig von der Region der Station.
+    'rare_collection_1': 50, 'rare_collection_5': 200,
+    'rare_collection_10': 450, 'rare_collection_20': 900,
 }
 
 LEVEL_MAX = 50
@@ -653,6 +676,16 @@ def check_achievements(conn, hex_, callsign, t_upper, cat, mil, dist, alt, overf
     for ach_id, prefixes in CALLSIGN_ACHIEVEMENTS:
         if any(cs_upper.startswith(p) for p in prefixes):
             unlock_achievement(conn, ach_id, hex_, callsign, now_ts)
+
+    # Seltenheiten-Sammlung: wie viele der RARE_AIRCRAFT_IDS sind bereits freigeschaltet -
+    # unabhaengig davon, welche genau (regional-fair, siehe Kommentar bei RARE_AIRCRAFT_IDS).
+    placeholders = ','.join('?' * len(RARE_AIRCRAFT_IDS))
+    rare_count = conn.execute(
+        f'SELECT COUNT(*) FROM achievements WHERE id IN ({placeholders})', RARE_AIRCRAFT_IDS
+    ).fetchone()[0]
+    for threshold in RARE_COLLECTION_THRESHOLDS:
+        if rare_count >= threshold:
+            unlock_achievement(conn, f'rare_collection_{threshold}', None, None, now_ts)
 
     cc = country_code_for_hex(hex_)
     if cc:
