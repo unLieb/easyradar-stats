@@ -2,7 +2,9 @@
 
 Companion backend for **easyRADAR** — polls an ultrafeeder instance's live aircraft data and tracks achievements, XP, and records (rare aircraft, ranges, countries, airlines, altitude, message volume, day/night patterns, anniversaries) in a local SQLite database. Serves them as JSON under `/api/` for the frontend to render.
 
-Not meant to run standalone outside the easyRADAR stack — see the main repo for full setup instructions.
+Not meant to run standalone outside the easyRADAR stack — see the [main repo](https://github.com/unLieb/easyradar) for full setup instructions.
+
+Published as `ghcr.io/unlieb/easyradar-stats:latest` (`linux/amd64` + `linux/arm64`) - no need to clone this repo unless you want to modify the code.
 
 ## Configuration (environment variables)
 
