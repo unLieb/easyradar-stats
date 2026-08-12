@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -924,6 +924,10 @@ def get_summary(range_):
         today = datetime.now().strftime('%Y-%m-%d')
         where = 'seen_date = ?'
         params = (today,)
+    elif range_ == 'yesterday':
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        where = 'seen_date = ?'
+        params = (yesterday,)
     else:
         where = '1=1'
         params = ()
@@ -968,16 +972,17 @@ def get_summary(range_):
         f'SELECT AVG(max_dist_km), AVG(max_alt_ft) FROM sightings WHERE {where}', params
     ).fetchone()
 
+    is_single_day = range_ in ('today', 'yesterday')
+
     messages_today = None
-    if range_ == 'today':
-        today = datetime.now().strftime('%Y-%m-%d')
+    if is_single_day:
         mrow = conn.execute(
-            'SELECT start_total, latest_total FROM daily_messages WHERE seen_date=?', (today,)
+            'SELECT start_total, latest_total FROM daily_messages WHERE seen_date=?', params
         ).fetchone()
         if mrow:
             messages_today = mrow[1] - mrow[0]
 
-    dir_where = 'seen_date = ?' if range_ == 'today' else '1=1'
+    dir_where = 'seen_date = ?' if is_single_day else '1=1'
     dir_rows = conn.execute(
         f'SELECT quadrant, MAX(max_dist_km) FROM direction_stats WHERE {dir_where} GROUP BY quadrant', params
     ).fetchall()
@@ -985,7 +990,7 @@ def get_summary(range_):
     for q, d in dir_rows:
         directions[q] = d
 
-    range_where = 'seen_date = ?' if range_ == 'today' else '1=1'
+    range_where = 'seen_date = ?' if is_single_day else '1=1'
     hist_rows = conn.execute(
         f'SELECT bucket, dist_bin, SUM(count) FROM range_hist WHERE {range_where} '
         f'GROUP BY bucket, dist_bin ORDER BY bucket, dist_bin', params
@@ -1022,6 +1027,78 @@ def get_summary(range_):
         'messagesToday': messages_today,
         'directions': directions,
         'rangeOutline': range_outline,
+        'rangeBucketDeg': RANGE_BUCKET_DEG,
+    }
+
+
+# "Ø pro Tag" - averages per calendar day, computed only from fully-completed
+# days (seen_date < today). The day still in progress is deliberately excluded
+# so the average isn't dragged down by a today that hasn't finished yet - see
+# CHANGELOG for the reasoning. Direction/range-outline breakdowns aren't
+# meaningfully "average-able" the same way (they're percentile-based spatial
+# summaries, not simple counts), so those are left empty here; the frontend
+# already renders an empty state for both when there's no data.
+def get_avgday_summary():
+    conn = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    day_count, since_date = conn.execute(
+        'SELECT COUNT(DISTINCT seen_date), MIN(seen_date) FROM sightings WHERE seen_date < ?', (today,)
+    ).fetchone()
+    if not day_count:
+        conn.close()
+        return {'dayCount': 0, 'sinceDate': None}
+
+    def avg_per_day(select_expr, extra_where=''):
+        row = conn.execute(
+            f'SELECT AVG(c) FROM (SELECT seen_date, {select_expr} c FROM sightings '
+            f'WHERE seen_date < ? {extra_where} GROUP BY seen_date)', (today,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def top_avg_per_day(group_expr, extra_where=''):
+        return conn.execute(
+            f'SELECT g, AVG(c) avgc FROM (SELECT seen_date, {group_expr} g, COUNT(*) c FROM sightings '
+            f'WHERE seen_date < ? {extra_where} GROUP BY seen_date, g) GROUP BY g '
+            f'ORDER BY avgc DESC LIMIT 5', (today,)
+        ).fetchall()
+
+    unique_count = avg_per_day('COUNT(DISTINCT hex)')
+    military_count = avg_per_day('COUNT(DISTINCT hex)', 'AND is_military=1')
+    top_types = top_avg_per_day('type', 'AND type IS NOT NULL')
+    top_calls = top_avg_per_day('callsign', 'AND callsign IS NOT NULL')
+    top_airlines = top_avg_per_day("SUBSTR(callsign,1,3)", "AND callsign GLOB '[A-Z][A-Z][A-Z][0-9]*'")
+
+    max_alt = avg_per_day('MAX(max_alt_ft)', 'AND max_alt_ft IS NOT NULL')
+    max_dist = avg_per_day('MAX(max_dist_km)', 'AND max_dist_km IS NOT NULL')
+    max_speed = avg_per_day('MAX(max_speed_kt)', 'AND max_speed_kt IS NOT NULL')
+    min_alt = avg_per_day('MIN(min_alt_ft)', 'AND min_alt_ft IS NOT NULL')
+
+    avg_row = conn.execute(
+        'SELECT AVG(max_dist_km), AVG(max_alt_ft) FROM sightings WHERE seen_date < ?', (today,)
+    ).fetchone()
+    messages_avg = conn.execute(
+        'SELECT AVG(latest_total - start_total) FROM daily_messages WHERE seen_date < ?', (today,)
+    ).fetchone()[0]
+
+    conn.close()
+    return {
+        'dayCount': day_count,
+        'sinceDate': since_date,
+        'uniqueCount': round(unique_count) if unique_count is not None else 0,
+        'militaryCount': round(military_count) if military_count is not None else 0,
+        'topTypes': [[g, round(c)] for g, c in top_types],
+        'topCallsigns': [[g, round(c)] for g, c in top_calls],
+        'topAirlineCodes': [[g, round(c)] for g, c in top_airlines],
+        'maxAlt': {'value': max_alt, 'callsign': None} if max_alt is not None else None,
+        'maxDist': {'value': max_dist, 'callsign': None} if max_dist is not None else None,
+        'maxSpeed': {'value': max_speed, 'callsign': None} if max_speed is not None else None,
+        'minAlt': {'value': min_alt, 'callsign': None} if min_alt is not None else None,
+        'avgDist': avg_row[0] if avg_row else None,
+        'avgAlt': avg_row[1] if avg_row else None,
+        'messagesToday': round(messages_avg) if messages_avg is not None else None,
+        'directions': {'N': None, 'E': None, 'S': None, 'W': None},
+        'rangeOutline': {},
         'rangeBucketDeg': RANGE_BUCKET_DEG,
     }
 
@@ -1072,10 +1149,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/summary':
             qs = parse_qs(parsed.query)
             range_ = qs.get('range', ['today'])[0]
-            if range_ not in ('today', 'alltime'):
+            if range_ not in ('today', 'yesterday', 'alltime', 'avgday'):
                 range_ = 'today'
             try:
-                self._send_json(get_summary(range_))
+                self._send_json(get_avgday_summary() if range_ == 'avgday' else get_summary(range_))
             except Exception as e:
                 print('summary error:', e, flush=True)
                 self.send_response(500)
