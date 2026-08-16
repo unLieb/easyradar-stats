@@ -639,6 +639,16 @@ def unlock_achievement(conn, achievement_id, hex_, callsign, now_ts):
         'INSERT OR IGNORE INTO achievements (id, unlocked_at, hex, callsign) VALUES (?,?,?,?)',
         (achievement_id, now_ts, hex_, callsign)
     )
+    # The very first poll that triggers a "first sighting" achievement can catch an
+    # aircraft before its callsign has decoded yet (common right as it enters range) -
+    # INSERT OR IGNORE then locks that gap in permanently, since only the first insert
+    # for a given id ever lands. Backfill it from a later poll of the same aircraft
+    # instead of leaving it blank forever once the callsign does show up.
+    if callsign and hex_:
+        conn.execute(
+            'UPDATE achievements SET callsign=? WHERE id=? AND hex=? AND callsign IS NULL',
+            (callsign, achievement_id, hex_)
+        )
 
 
 def maybe_break_record(conn, category, value, hex_, callsign, now_ts, higher_is_better):
