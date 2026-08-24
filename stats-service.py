@@ -20,6 +20,11 @@ POLL_URL = 'http://ultrafeeder/data/aircraft.json'
 STATS_URL = 'http://ultrafeeder/data/stats.json'
 POLL_INTERVAL = 5
 MIN_OVERFLIGHT_ALT_FT = 100
+# Generously above anything a real aircraft could plausibly do (fastest jets in a
+# dive are still well under 1500kt) - a value above this is a corrupted airborne
+# velocity decode, not a genuine speed, and would otherwise get recorded as a
+# "record" and skew the stats permanently.
+MAX_PLAUSIBLE_SPEED_KT = 2000
 RANGE_BUCKET_DEG = 5
 RANGE_BUCKETS = 360 // RANGE_BUCKET_DEG
 RANGE_DIST_BIN_KM = 5
@@ -822,7 +827,7 @@ def poll_once():
         alt = alt if isinstance(alt, (int, float)) else None
         overflight_alt = alt if (alt is not None and alt >= MIN_OVERFLIGHT_ALT_FT) else None
         speed = a.get('gs')
-        speed = speed if isinstance(speed, (int, float)) else None
+        speed = speed if isinstance(speed, (int, float)) and 0 <= speed <= MAX_PLAUSIBLE_SPEED_KT else None
         type_ = a.get('t') or (a.get('desc') or '').strip() or None
         callsign = (a.get('flight') or '').strip() or None
         mil = 1 if is_military(a) else 0
