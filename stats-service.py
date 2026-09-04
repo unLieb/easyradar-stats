@@ -41,7 +41,9 @@ BUSINESS_TYPES = ['LJ', 'C25', 'C56', 'C68', 'C700', 'C750', 'GLF', 'GL5', 'GLEX
 # CHX is what German air rescue ("Christoph") helicopters actually transmit as
 # their ADS-B flight ident (e.g. CHX31) - CHRISTOPH is the spoken radio
 # callsign, not what's on the wire, so it alone never matched a real one.
-EINSATZ_CALLSIGN_PREFIXES = ['CHX', 'CHRISTOPH', 'RESCUE', 'REGA', 'POLIZEI', 'POLICE', 'BPOL']
+# Same story for Bundespolizei: BPO (e.g. BPO441), not BPOL - confirmed via
+# FlightAware, the old 4-letter BPOL never matched anything real either.
+EINSATZ_CALLSIGN_PREFIXES = ['CHX', 'CHRISTOPH', 'RESCUE', 'REGA', 'POLIZEI', 'POLICE', 'BPO']
 
 # (achievement id, list of type-code prefixes that unlock it) - checked with the
 # same digit-boundary-safe prefix match used for MIL_TYPES.
