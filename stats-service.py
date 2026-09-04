@@ -445,9 +445,22 @@ def matches_type_prefix(t, p):
     return not t[len(p)].isdigit()
 
 
+
+# German Navy (Marinefliegergeschwader 5, Nordholz) is GNY+number. Worth a
+# callsign check specifically because its Lynx and Sea King (S61) aren't in
+# MIL_TYPES at all, and its EC135s can't go in MIL_TYPES to begin with - that
+# type is predominantly civilian (rescue/police), so tagging it military by
+# type alone would misclassify every civilian one:
+# https://knowledgebase.vatsim-germany.org/books/heli-ops/page/militarfliegerei
+MIL_CALLSIGN_PREFIXES = ['GNY']
+
+
 def is_military(a):
     db_flags = a.get('dbFlags')
     if db_flags and (db_flags & 1):
+        return True
+    callsign = (a.get('flight') or '').strip().upper()
+    if any(callsign.startswith(p) for p in MIL_CALLSIGN_PREFIXES):
         return True
     t = (a.get('t') or '').upper()
     return any(matches_type_prefix(t, p) for p in MIL_TYPES)
