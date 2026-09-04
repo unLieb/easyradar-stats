@@ -46,8 +46,11 @@ BUSINESS_TYPES = ['LJ', 'C25', 'C56', 'C68', 'C700', 'C750', 'GLF', 'GL5', 'GLEX
 # helicopters (Landespolizei) have their own distinct ICAO prefix, unrelated
 # to Bundespolizei's despite Berlin's spoken callsign also being "Pirol":
 # https://knowledgebase.vatsim-germany.org/books/heli-ops/page/polizeifliegerei
+# Bundeswehr search & rescue (Heer/Marine) transmits RESQ+number (e.g.
+# RESQ63), not "RESCUE" - and Northern Helicopter (offshore SAR) is NHC:
+# https://knowledgebase.vatsim-germany.org/books/heli-ops/page/luftrettung
 EINSATZ_CALLSIGN_PREFIXES = [
-    'CHX', 'CHRISTOPH', 'RESCUE', 'REGA', 'POLIZEI', 'POLICE', 'BPO',
+    'CHX', 'CHRISTOPH', 'RESQ', 'RESCUE', 'NHC', 'REGA', 'POLIZEI', 'POLICE', 'BPO',
     'PBW', 'EDL', 'PBB', 'LIB', 'IBIS', 'PMV', 'PPH', 'HUMMEL', 'SRP', 'PHS', 'PIK', 'HBT',
 ]
 
@@ -87,7 +90,7 @@ TYPE_ACHIEVEMENTS = [
 ]
 # (achievement id, callsign prefixes)
 CALLSIGN_ACHIEVEMENTS = [
-    ('first_rescue_heli', ['CHX', 'CHRISTOPH', 'RESCUE', 'REGA']),
+    ('first_rescue_heli', ['CHX', 'CHRISTOPH', 'RESQ', 'RESCUE', 'NHC', 'REGA']),
     ('rare_nasa', ['NASA']),
 ]
 # (achievement id, ICAO airline designator)
