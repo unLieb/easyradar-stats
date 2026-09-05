@@ -466,6 +466,11 @@ def is_military(a):
     return any(matches_type_prefix(t, p) for p in MIL_TYPES)
 
 
+def is_einsatz(a):
+    callsign = (a.get('flight') or '').strip().upper()
+    return any(callsign.startswith(p) for p in EINSATZ_CALLSIGN_PREFIXES)
+
+
 def country_code_for_hex(hex_):
     if not hex_ or hex_.startswith('~'):
         return None
@@ -587,6 +592,8 @@ def get_db():
         conn.execute('ALTER TABLE sightings ADD COLUMN min_alt_ft REAL')
     if 'is_military' not in existing_cols:
         conn.execute('ALTER TABLE sightings ADD COLUMN is_military INTEGER DEFAULT 0')
+    if 'is_einsatz' not in existing_cols:
+        conn.execute('ALTER TABLE sightings ADD COLUMN is_einsatz INTEGER DEFAULT 0')
     conn.execute('''CREATE TABLE IF NOT EXISTS direction_stats (
         seen_date TEXT NOT NULL,
         quadrant TEXT NOT NULL,
@@ -858,11 +865,12 @@ def poll_once():
         type_ = a.get('t') or (a.get('desc') or '').strip() or None
         callsign = (a.get('flight') or '').strip() or None
         mil = 1 if is_military(a) else 0
+        einsatz = 1 if is_einsatz(a) else 0
         cat = a.get('category') or ''
         t_upper = (a.get('t') or '').upper()
 
         row = conn.execute(
-            'SELECT max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military FROM sightings WHERE hex=? AND seen_date=?',
+            'SELECT max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military, is_einsatz FROM sightings WHERE hex=? AND seen_date=?',
             (hex_, today)
         ).fetchone()
         is_new_today = row is None
@@ -875,9 +883,9 @@ def poll_once():
 
         if is_new_today:
             conn.execute(
-                'INSERT INTO sightings (hex, seen_date, type, callsign, max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military, first_seen_ts) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?)',
-                (hex_, today, type_, callsign, alt, dist, speed, overflight_alt, mil, now_ts)
+                'INSERT INTO sightings (hex, seen_date, type, callsign, max_alt_ft, max_dist_km, max_speed_kt, min_alt_ft, is_military, is_einsatz, first_seen_ts) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                (hex_, today, type_, callsign, alt, dist, speed, overflight_alt, mil, einsatz, now_ts)
             )
         else:
             new_alt = max((v for v in (row[0], alt) if v is not None), default=None)
@@ -885,10 +893,11 @@ def poll_once():
             new_speed = max((v for v in (row[2], speed) if v is not None), default=None)
             new_min_alt = min((v for v in (row[3], overflight_alt) if v is not None), default=None)
             new_mil = 1 if (row[4] or mil) else 0
+            new_einsatz = 1 if (row[5] or einsatz) else 0
             conn.execute(
-                'UPDATE sightings SET max_alt_ft=?, max_dist_km=?, max_speed_kt=?, min_alt_ft=?, is_military=?, '
+                'UPDATE sightings SET max_alt_ft=?, max_dist_km=?, max_speed_kt=?, min_alt_ft=?, is_military=?, is_einsatz=?, '
                 'type=COALESCE(?, type), callsign=COALESCE(?, callsign) WHERE hex=? AND seen_date=?',
-                (new_alt, new_dist, new_speed, new_min_alt, new_mil, type_, callsign, hex_, today)
+                (new_alt, new_dist, new_speed, new_min_alt, new_mil, new_einsatz, type_, callsign, hex_, today)
             )
 
     today_count = conn.execute(
@@ -978,6 +987,9 @@ def get_summary(range_):
     military_count = conn.execute(
         f'SELECT COUNT(DISTINCT hex) FROM sightings WHERE {where} AND is_military=1', params
     ).fetchone()[0]
+    einsatz_count = conn.execute(
+        f'SELECT COUNT(DISTINCT hex) FROM sightings WHERE {where} AND is_einsatz=1', params
+    ).fetchone()[0]
 
     top_types = conn.execute(
         f'SELECT type, COUNT(*) c FROM sightings WHERE {where} AND type IS NOT NULL '
@@ -1060,6 +1072,7 @@ def get_summary(range_):
         'topCallsigns': [[cs, c] for cs, c in top_calls],
         'topAirlineCodes': [[code, c] for code, c in top_airlines],
         'militaryCount': military_count,
+        'einsatzCount': einsatz_count,
         'maxAlt': {'value': max_alt_row[2], 'callsign': max_alt_row[1] or max_alt_row[0]} if max_alt_row else None,
         'maxDist': {'value': max_dist_row[2], 'callsign': max_dist_row[1] or max_dist_row[0]} if max_dist_row else None,
         'maxSpeed': {'value': max_speed_row[2], 'callsign': max_speed_row[1] or max_speed_row[0]} if max_speed_row else None,
@@ -1107,6 +1120,7 @@ def get_avgday_summary():
 
     unique_count = avg_per_day('COUNT(DISTINCT hex)')
     military_count = avg_per_day('COUNT(DISTINCT hex)', 'AND is_military=1')
+    einsatz_count = avg_per_day('COUNT(DISTINCT hex)', 'AND is_einsatz=1')
     top_types = top_avg_per_day('type', 'AND type IS NOT NULL')
     top_calls = top_avg_per_day('callsign', 'AND callsign IS NOT NULL')
     top_airlines = top_avg_per_day("SUBSTR(callsign,1,3)", "AND callsign GLOB '[A-Z][A-Z][A-Z][0-9]*'")
@@ -1129,6 +1143,7 @@ def get_avgday_summary():
         'sinceDate': since_date,
         'uniqueCount': round(unique_count) if unique_count is not None else 0,
         'militaryCount': round(military_count) if military_count is not None else 0,
+        'einsatzCount': round(einsatz_count) if einsatz_count is not None else 0,
         'topTypes': [[g, round(c)] for g, c in top_types],
         'topCallsigns': [[g, round(c)] for g, c in top_calls],
         'topAirlineCodes': [[g, round(c)] for g, c in top_airlines],
