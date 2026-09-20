@@ -20,11 +20,18 @@ POLL_URL = 'http://ultrafeeder/data/aircraft.json'
 STATS_URL = 'http://ultrafeeder/data/stats.json'
 POLL_INTERVAL = 5
 MIN_OVERFLIGHT_ALT_FT = 100
-# Generously above anything a real aircraft could plausibly do (fastest jets in a
-# dive are still well under 1500kt) - a value above this is a corrupted airborne
+# Ground-speed plausibility limits. A value above these is a corrupted airborne
 # velocity decode, not a genuine speed, and would otherwise get recorded as a
 # "record" and skew the stats permanently.
-MAX_PLAUSIBLE_SPEED_KT = 2000
+# Civil: the fastest airliner ground speeds ever recorded (jet-stream tailwind)
+# are ~720kt, so 750kt leaves a little headroom. Military jets can legitimately
+# fly much faster, so they get a far higher ceiling.
+MAX_PLAUSIBLE_SPEED_KT = 750
+MAX_PLAUSIBLE_SPEED_MIL_KT = 1500
+# Two consecutive polls are POLL_INTERVAL (5s) apart; no aircraft changes its
+# ground speed by more than this in that time, so a bigger jump means one of the
+# two samples is a decode glitch. Such a sample is dropped rather than recorded.
+MAX_GS_JUMP_KT = 150
 RANGE_BUCKET_DEG = 5
 RANGE_BUCKETS = 360 // RANGE_BUCKET_DEG
 RANGE_DIST_BIN_KM = 5
@@ -809,6 +816,31 @@ def check_achievements(conn, hex_, callsign, t_upper, cat, mil, dist, alt, overf
             unlock_achievement(conn, 'night_owl', None, None, now_ts)
 
 
+# hex -> gs from the previous poll, used by plausible_speed() to reject isolated
+# spikes. Rebuilt every poll so it only ever holds aircraft seen in the last poll.
+_last_gs = {}
+
+
+def plausible_speed(hex_, gs, mil, gs_now):
+    """Return gs if it is a believable ground speed, else None.
+
+    Requires the value to be under the per-class ceiling AND to agree with the
+    previous poll's value for the same aircraft - so a single corrupted sample
+    (which is how a "1800 km/h Boeing 737" got recorded) can never count.
+    The first sample of an aircraft has nothing to be checked against and is
+    therefore not counted either."""
+    if not isinstance(gs, (int, float)):
+        return None
+    gs_now[hex_] = gs
+    ceiling = MAX_PLAUSIBLE_SPEED_MIL_KT if mil else MAX_PLAUSIBLE_SPEED_KT
+    if not 0 <= gs <= ceiling:
+        return None
+    prev = _last_gs.get(hex_)
+    if prev is None or abs(gs - prev) > MAX_GS_JUMP_KT:
+        return None
+    return gs
+
+
 def poll_once():
     with urllib.request.urlopen(POLL_URL, timeout=4) as r:
         data = json.load(r)
@@ -825,6 +857,8 @@ def poll_once():
         if days_elapsed >= d:
             unlock_achievement(conn, f'anniversary_{d}', None, None, now_ts)
 
+    global _last_gs
+    gs_now = {}
     for a in data.get('aircraft', []):
         hex_ = a.get('hex')
         if not hex_:
@@ -860,11 +894,10 @@ def poll_once():
         alt = a.get('alt_baro')
         alt = alt if isinstance(alt, (int, float)) else None
         overflight_alt = alt if (alt is not None and alt >= MIN_OVERFLIGHT_ALT_FT) else None
-        speed = a.get('gs')
-        speed = speed if isinstance(speed, (int, float)) and 0 <= speed <= MAX_PLAUSIBLE_SPEED_KT else None
+        mil = 1 if is_military(a) else 0
+        speed = plausible_speed(hex_, a.get('gs'), mil, gs_now)
         type_ = a.get('t') or (a.get('desc') or '').strip() or None
         callsign = (a.get('flight') or '').strip() or None
-        mil = 1 if is_military(a) else 0
         einsatz = 1 if is_einsatz(a) else 0
         cat = a.get('category') or ''
         t_upper = (a.get('t') or '').upper()
